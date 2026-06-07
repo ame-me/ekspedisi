@@ -7,6 +7,7 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [decryptedData, setDecryptedData] = useState({});
   const [currentView, setCurrentView] = useState('dashboard');
+  const [dbConnected, setDbConnected] = useState(false);
   const [loginData, setLoginData] = useState({ username: '', password: '' });
   const [searchTerm, setSearchTerm] = useState('');
   
@@ -16,8 +17,10 @@ function App() {
   ]);
   
   const [formData, setFormData] = useState({
-    sender: '', receiver: '', phone: '', address: '', 
-    item_type: 'Dokumen', weight: 1, service: 'Reguler', notes: ''
+    senderName: '', senderPhone: '', senderKec: '', senderAddr: '',
+    receiverName: '', receiverPhone: '', receiverKec: '', receiverAddr: '',
+    itemName: '', itemCategory: 'Pakaian', itemDesc: '', 
+    service: 'Reguler', insuranceValue: 0, weight: 1, itemValue: 0
   });
 
   const API_URL = 'http://127.0.0.1:5000/api';
@@ -32,9 +35,16 @@ function App() {
   const fetchKey = async () => {
     try {
       const response = await fetch(`${API_URL}/key`);
+      if (!response.ok) throw new Error('Failed to fetch key');
       const data = await response.json();
       setServerKey(data.key);
-    } catch (err) { console.error(err); }
+      setDbConnected(true);
+      addLog('Master Key synchronized with server.', 'success');
+    } catch (err) { 
+      console.error(err);
+      setDbConnected(false);
+      addLog('Failed to sync Master Key. Check server!', 'warning');
+    }
   }
 
   const fetchShipments = async () => {
@@ -52,7 +62,7 @@ function App() {
 
   const handleLogin = (e) => {
     e.preventDefault();
-    if (loginData.username === 'admin' && loginData.password === 'uts123') {
+    if (loginData.username === 'admin' && loginData.password === 'admin') {
       setIsLoggedIn(true);
       addLog('Admin authenticated via secure gateway.', 'success');
     } else {
@@ -61,16 +71,6 @@ function App() {
     }
   };
 
-  const handleDelete = async (id) => {
-    if (!window.confirm("Hapus data pengiriman ini secara permanen?")) return;
-    try {
-      const response = await fetch(`${API_URL}/shipments/${id}`, { method: 'DELETE' });
-      if (response.ok) {
-        await fetchShipments();
-        addLog(`Record ${id} deleted.`, 'warning');
-      }
-    } catch (err) { console.error(err); }
-  };
 
   const updateStatus = async (id, newStatus) => {
     try {
@@ -102,76 +102,108 @@ function App() {
       const response = await fetch(`${API_URL}/shipments`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          sender: formData.sender,
-          receiver: formData.receiver,
-          phone: formData.phone,
-          address: formData.address,
-          description: fullDescription
-        })
+        body: JSON.stringify(formData)
       });
       if (response.ok) {
-        setFormData({ sender: '', receiver: '', phone: '', address: '', item_type: 'Dokumen', weight: 1, service: 'Reguler', notes: '' });
+        setFormData({ 
+          senderName: '', senderPhone: '', senderKec: '', senderAddr: '',
+          receiverName: '', receiverPhone: '', receiverKec: '', receiverAddr: '',
+          itemName: '', itemCategory: 'Pakaian', itemDesc: '', 
+          service: 'Reguler', insuranceValue: 0, weight: 1, itemValue: 0
+        });
         fetchShipments();
         addLog(`New shipment secured and saved.`, 'success');
+        alert("Data berhasil disimpan secara terenkripsi!");
         setCurrentView('dashboard');
+      } else {
+        const errorData = await response.json();
+        alert(`Gagal menyimpan: ${errorData.error || 'Server error'}`);
+        addLog(`Failed to save shipment: ${errorData.error}`, 'warning');
       }
-    } catch (err) { console.error(err); }
+    } catch (err) { 
+      console.error(err); 
+      alert("Gagal menghubungi server. Pastikan server backend sudah jalan (node server.cjs)");
+      addLog(`Connection error: ${err.message}`, 'warning');
+    }
     finally { setLoading(false); }
   };
 
-  const handleDecrypt = async (id, encryptedAddress, encryptedPhone, nonce) => {
+  const handleDecrypt = async (id, itemsToDecrypt, nonce) => {
     try {
       addLog(`Decrypting dataset ${id}...`, 'info');
-      const resAddr = await fetch(`${API_URL}/decrypt`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ encryptedData: encryptedAddress, nonceBase64: nonce })
-      });
-      const dataAddr = await resAddr.json();
+      const decryptedResults = {};
+      
+      for (const [key, encryptedData] of Object.entries(itemsToDecrypt)) {
+        const res = await fetch(`${API_URL}/decrypt`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ encryptedData, nonceBase64: nonce })
+        });
+        const data = await res.json();
+        decryptedResults[`${key}_${id}`] = data.decrypted;
+      }
 
-      const resPhone = await fetch(`${API_URL}/decrypt`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ encryptedData: encryptedPhone, nonceBase64: nonce })
-      });
-      const dataPhone = await resPhone.json();
-
-      setDecryptedData(prev => ({ 
-        ...prev, 
-        [`addr_${id}`]: dataAddr.decrypted,
-        [`phone_${id}`]: dataPhone.decrypted 
-      }));
+      setDecryptedData(prev => ({ ...prev, ...decryptedResults }));
       addLog(`ChaCha20 Decryption completed for ${id}.`, 'success');
     } catch (err) { console.error(err); }
   };
 
-  const handleLock = (id) => {
-    const newDecrypted = { ...decryptedData };
-    delete newDecrypted[`addr_${id}`];
-    delete newDecrypted[`phone_${id}`];
-    setDecryptedData(newDecrypted);
-    addLog(`Record ${id} re-locked.`, 'info');
+  const handleDecryptAll = async () => {
+    if (shipments.length === 0) return;
+    addLog('Master audit decryption started...', 'warning');
+    for (const item of shipments) {
+      await handleDecrypt(item.id, {
+        sender: item.sender_name_enc,
+        sender_phone: item.sender_phone_enc,
+        sender_kec: item.sender_kec_enc,
+        sender_addr: item.sender_addr_enc,
+        receiver: item.receiver_name_enc,
+        receiver_phone: item.receiver_phone_enc,
+        receiver_kec: item.receiver_kec_enc,
+        receiver_addr: item.receiver_addr_enc,
+        item_name: item.item_name_enc,
+        item_cat: item.item_category_enc,
+        desc: item.item_desc_enc,
+        insurance: item.insurance_enc
+      }, item.nonce);
+    }
   };
 
-  const parseItemData = (desc) => {
-    const service = desc.split(' - ')[1]?.split('. ')[0] || 'Reguler';
-    const weight = parseFloat(desc.match(/\((.*?)kg\)/)?.[1] || '1');
-    const type = desc.split(' (')[0] || 'Paket';
-    const cost = weight * (service === 'Ekspres' ? 25000 : 15000);
-    return { service, weight, type, cost };
+  const handleLock = (id) => {
+    const newDecrypted = { ...decryptedData };
+    // Bersihkan semua data terkait ID ini
+    Object.keys(newDecrypted).forEach(key => {
+      if (key.endsWith(`_${id}`)) {
+        delete newDecrypted[key];
+      }
+    });
+    setDecryptedData(newDecrypted);
+    addLog(`Record ${id} re-locked for security.`, 'info');
+  };
+
+  const parseItemData = (item) => {
+    const service = item.service_type || 'Reguler';
+    const weight = item.weight || 1;
+    const baseRate = 10000;
+    const multiplier = service === 'Ekspres' ? 1.5 : service === 'Same Day' ? 2 : 1;
+    const cost = (weight * baseRate * multiplier) + 5000;
+    return { service, weight, type: 'Paket', cost };
   };
 
   const printReceipt = async (item) => {
-    let addr = decryptedData[`addr_${item.id}`];
-    let phone = decryptedData[`phone_${item.id}`];
-    if (!addr || !phone) {
+    let sender = decryptedData[`sender_${item.id}`];
+    let receiver = decryptedData[`receiver_${item.id}`];
+    let addr = decryptedData[`receiver_addr_${item.id}`];
+    let kec = decryptedData[`receiver_kec_${item.id}`];
+    let phone = decryptedData[`receiver_phone_${item.id}`];
+    
+    if (!sender || !receiver || !addr) {
       addLog(`Akses Ditolak: Data masih terenkripsi.`, 'warning');
-      return alert("Akses Ditolak! Mohon dekripsi data (klik gembok biru) terlebih dahulu sebelum mencetak resi untuk alasan keamanan.");
+      return alert("Akses Ditolak! Mohon dekripsi data terlebih dahulu sebelum mencetak resi.");
     }
     
     updateStatus(item.id, 'Ready to Ship');
-    const { service, weight, type } = parseItemData(item.item_description);
+    const { service } = parseItemData(item);
     const win = window.open('', '_blank');
     win.document.write(`
       <html><head><style>
@@ -184,51 +216,75 @@ function App() {
         .barcode-section { padding: 15px; text-align: center; border-bottom: 2px solid #000; background: #fff; }
         .barcode-visual { height: 60px; background: repeating-linear-gradient(90deg, #000, #000 2px, #fff 2px, #fff 6px); width: 80%; margin: 0 auto; }
         .tracking-text { font-size: 28px; font-weight: 900; letter-spacing: 4px; margin-top: 10px; }
-        .address-grid { display: grid; grid-template-columns: 1fr 1fr; border-bottom: 2px solid #000; }
-        .address-box { padding: 12px; border-right: 2px solid #000; }
-        .label-small { font-size: 10px; font-weight: 800; text-transform: uppercase; margin-bottom: 5px; opacity: 0.7; }
-        .address-val { font-size: 14px; font-weight: 700; line-height: 1.2; }
         .receiver-main { padding: 15px; background: #fff; border-bottom: 2px solid #000; }
         .receiver-name { font-size: 24px; font-weight: 900; margin-bottom: 5px; }
-        .receiver-addr { font-size: 16px; font-weight: 400; color: #333; }
-        .item-info { display: flex; justify-content: space-between; padding: 10px 15px; font-size: 12px; font-weight: 800; border-bottom: 2px solid #000; }
-        .footer-sig { display: grid; grid-template-columns: 1fr 1fr; height: 80px; }
-        .sig-box { border-right: 2px solid #000; padding: 10px; text-align: center; }
-        .sig-line { margin-top: 35px; border-top: 1px dashed #000; width: 80%; margin-left: 10%; }
+        .address-box { padding: 12px; border-bottom: 2px solid #000; }
+        .label-small { font-size: 10px; font-weight: 800; text-transform: uppercase; margin-bottom: 5px; opacity: 0.7; }
+        .address-val { font-size: 14px; font-weight: 700; line-height: 1.2; }
         .security-footer { font-size: 8px; text-align: center; padding: 5px; background: #f4f4f4; border-top: 1px solid #000; font-weight: 700; }
       </style></head>
       <body>
         <div class="label-container">
           <div class="receipt-header"><div class="brand">EKSPRESIN AJA</div><div class="service-badge">${service.toUpperCase()}</div></div>
           <div class="barcode-section"><div class="barcode-visual"></div><div class="tracking-text">${item.tracking_number}</div></div>
-          <div class="address-grid">
-            <div class="address-box"><div class="label-small">PENGIRIM (FROM)</div><div class="address-val">${item.sender_name}</div></div>
-            <div class="address-box"><div class="label-small">BERAT (WEIGHT)</div><div class="address-val" style="font-size:20px;">${weight} Kg</div></div>
-          </div>
+          <div class="address-box"><div class="label-small">PENGIRIM (SENDER)</div><div class="address-val">${sender}</div></div>
           <div class="receiver-main">
-            <div class="label-small" style="color:red;">PENERIMA (TO)</div><div class="receiver-name">${item.receiver_name}</div>
-            <div class="address-val" style="font-size:18px; margin-bottom:8px;">${phone}</div><div class="receiver-addr">${addr}</div>
+            <div class="label-small" style="color:red;">PENERIMA (RECEIVER)</div><div class="receiver-name">${receiver}</div>
+            <div class="address-val" style="font-size:18px; margin-bottom:8px;">${phone}</div><div class="address-val">${kec}, ${addr}</div>
           </div>
-          <div class="item-info"><div>ISI: ${type.toUpperCase()}</div><div>TGL: ${new Date().toLocaleDateString('id-ID')}</div></div>
-          <div class="footer-sig">
-            <div class="sig-box"><div class="label-small">PETUGAS</div><div class="sig-line"></div></div>
-            <div class="sig-box" style="border-right:none;"><div class="label-small">PENERIMA</div><div class="sig-line"></div></div>
-          </div>
-          <div class="security-footer">SECURED BY CHACHA20 // KEY: ${serverKey}</div>
+          ${item.item_notes ? `
+          <div class="address-box" style="background:#fff7ed; border-top: 1px dashed #000;">
+            <div class="label-small" style="color:#c2410c;">INSTRUKSI KURIR / NOTES</div>
+            <div class="address-val" style="font-size:16px; font-weight:900; text-transform:uppercase;">${item.item_notes}</div>
+          </div>` : ''}
+          <div class="security-footer">SECURED BY CHACHA20 // DATA PROTECTED</div>
         </div>
+      </body></html>
+    `);
+    win.document.close(); win.print();
+  };
+  
+  const printFullReport = () => {
+    const win = window.open('', '_blank');
+    const totalRev = calculateTotalRevenue();
+    win.document.write(`
+      <html><head><style>
+        body { font-family: 'Outfit', sans-serif; padding: 40px; }
+        h1 { text-align: center; border-bottom: 2px solid #000; padding-bottom: 10px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
+        th { background: #f4f4f4; }
+        .footer { margin-top: 30px; text-align: right; font-weight: bold; }
+      </style></head>
+      <body>
+        <h1>LAPORAN MANIFEST EKSPRESIN AJA</h1>
+        <p>Tanggal Cetak: ${new Date().toLocaleString()}</p>
+        <table>
+          <thead><tr><th>Resi</th><th>Layanan</th><th>Berat</th><th>Biaya</th><th>Status</th></tr></thead>
+          <tbody>
+            ${shipments.map(s => `
+              <tr>
+                <td>${s.tracking_number}</td>
+                <td>${s.service_type}</td>
+                <td>${s.weight} kg</td>
+                <td>Rp ${parseItemData(s).cost.toLocaleString()}</td>
+                <td>${s.status}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+        <div class="footer">Total Revenue: Rp ${totalRev.toLocaleString()}</div>
       </body></html>
     `);
     win.document.close(); win.print();
   };
 
   const calculateTotalRevenue = () => {
-    return shipments.reduce((total, item) => total + parseItemData(item.item_description).cost, 0);
+    return shipments.reduce((total, item) => total + parseItemData(item).cost, 0);
   };
 
   const filteredShipments = shipments.filter(s => 
-    s.tracking_number.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    s.receiver_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    s.sender_name.toLowerCase().includes(searchTerm.toLowerCase())
+    s.tracking_number.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
   if (!isLoggedIn) {
@@ -272,8 +328,14 @@ function App() {
 
         {currentView === 'dashboard' && (
           <div className="fade-in">
+            {!dbConnected && (
+              <div className="card" style={{background: '#fee2e2', border: '1px solid #ef4444', marginBottom: '2rem', color: '#b91c1c'}}>
+                <strong>⚠️ Server Offline:</strong> Data tidak dapat dimuat atau disimpan. Pastikan Anda menjalankan <code>npm run server</code> di terminal baru.
+              </div>
+            )}
+
             <div className="stats-grid">
-              <div className="stat-card" style={{borderLeft:'5px solid var(--primary)'}}><span className="stat-label">Total Shipments</span><div className="stat-value" style={{color:'var(--primary)'}}>{shipments.length}</div><div className="stat-trend">DB Status: Connected</div></div>
+              <div className="stat-card" style={{borderLeft:'5px solid var(--primary)'}}><span className="stat-label">Total Shipments</span><div className="stat-value" style={{color:'var(--primary)'}}>{shipments.length}</div><div className="stat-trend" style={{color: dbConnected ? 'var(--success)' : 'var(--danger)'}}>{dbConnected ? 'DB Status: Connected' : 'DB Status: Disconnected'}</div></div>
               <div className="stat-card" style={{borderLeft:'5px solid var(--success)'}}><span className="stat-label">Ready to Ship</span><div className="stat-value">{shipments.filter(s => s.status === 'Ready to Ship').length}</div><div className="stat-trend">Label Terbit</div></div>
               <div className="stat-card" style={{borderLeft:'5px solid #6366f1'}}><span className="stat-label">Total Revenue</span><div className="stat-value" style={{fontSize:'1.5rem'}}>Rp {calculateTotalRevenue().toLocaleString()}</div><div className="stat-trend" style={{color:'var(--success)'}}>Live Income</div></div>
             </div>
@@ -288,12 +350,12 @@ function App() {
                    <table className="custom-table" style={{fontSize:'0.85rem'}}>
                      <thead><tr><th>Resi</th><th>Penerima</th><th>Layanan</th><th>Status</th></tr></thead>
                      <tbody>
-                       {[...shipments].reverse().slice(0, 6).map(s => {
-                         const { service } = parseItemData(s.item_description);
+                       {shipments.slice(0, 6).map(s => {
+                         const { service } = parseItemData(s);
                          return (
                            <tr key={s.id}>
                              <td style={{fontWeight:'bold', padding:'1rem 5px'}}>{s.tracking_number}</td>
-                             <td>{s.receiver_name}</td>
+                             <td>{decryptedData[`receiver_${s.id}`] || '••••••••'}</td>
                              <td><span className={`service-badge ${service === 'Ekspres' ? 'ekspres' : ''}`}>{service}</span></td>
                              <td>
                                <span 
@@ -350,25 +412,93 @@ function App() {
         )}
 
         {currentView === 'registration' && (
-          <div className="fade-in card" style={{maxWidth: '1000px'}}>
-            <h2>Form Pendaftaran Paket (Secured)</h2>
-            <form onSubmit={handleSubmit} style={{marginTop: '2rem'}}>
-              <div className="form-row">
-                <div className="form-group"><label>Nama Pengirim</label><input type="text" value={formData.sender} onChange={e => setFormData({...formData, sender: e.target.value})} required /></div>
-                <div className="form-group"><label>Nama Penerima</label><input type="text" value={formData.receiver} onChange={e => setFormData({...formData, receiver: e.target.value})} required /></div>
+          <div className="fade-in card" style={{maxWidth: '1000px', padding: '0', background: '#f8fafc'}}>
+            <div style={{padding: '2rem', background: '#fff', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
+              <h2 style={{margin: 0}}>Tambah Paket Baru</h2>
+              <div className="service-badge ekspres">{formData.service}</div>
+            </div>
+
+            <form onSubmit={handleSubmit} style={{padding: '2rem'}}>
+              {/* SECTION PENGIRIM */}
+              <div className="form-section-card">
+                <div className="section-header">PENGIRIM</div>
+                <div className="form-row">
+                  <div className="form-group"><label>Nama Pengirim</label><input type="text" value={formData.senderName} onChange={e => setFormData({...formData, senderName: e.target.value})} placeholder="Nama Lengkap" required /></div>
+                  <div className="form-group"><label>No. Telp/HP</label><input type="text" value={formData.senderPhone} onChange={e => setFormData({...formData, senderPhone: e.target.value})} placeholder="08xxxxxxxxxx" required /></div>
+                </div>
+                <div className="form-row">
+                  <div className="form-group"><label>Kecamatan/Kabupaten</label><input type="text" value={formData.senderKec} onChange={e => setFormData({...formData, senderKec: e.target.value})} placeholder="Cth: Depok, Sleman" required /></div>
+                </div>
+                <div className="form-group"><label>Detail Alamat</label><textarea rows="2" value={formData.senderAddr} onChange={e => setFormData({...formData, senderAddr: e.target.value})} placeholder="Nama jalan, nomor rumah, RT/RW" required></textarea></div>
               </div>
-              <div className="form-row">
-                <div className="form-group"><label>Nomor HP (Secured)</label><input type="text" value={formData.phone} onChange={e => setFormData({...formData, phone: e.target.value})} required /></div>
-                <div className="form-group"><label>Jenis Layanan</label><select value={formData.service} onChange={e => setFormData({...formData, service: e.target.value})} className="modern-select"><option>Reguler</option><option>Ekspres</option><option>Same Day</option></select></div>
+
+              {/* SECTION PENERIMA */}
+              <div className="form-section-card" style={{marginTop: '2rem'}}>
+                <div className="section-header" style={{color: '#ef4444'}}>PENERIMA</div>
+                <div className="form-row">
+                  <div className="form-group"><label>Nama Penerima</label><input type="text" value={formData.receiverName} onChange={e => setFormData({...formData, receiverName: e.target.value})} placeholder="Nama Lengkap" required /></div>
+                  <div className="form-group"><label>No. Telp/HP</label><input type="text" value={formData.receiverPhone} onChange={e => setFormData({...formData, receiverPhone: e.target.value})} placeholder="08xxxxxxxxxx" required /></div>
+                </div>
+                <div className="form-row">
+                  <div className="form-group"><label>Kecamatan/Kabupaten</label><input type="text" value={formData.receiverKec} onChange={e => setFormData({...formData, receiverKec: e.target.value})} placeholder="Cth: Lowokwaru, Malang" required /></div>
+                </div>
+                <div className="form-group"><label>Detail Alamat</label><textarea rows="2" value={formData.receiverAddr} onChange={e => setFormData({...formData, receiverAddr: e.target.value})} placeholder="Nama jalan, nomor rumah, RT/RW" required></textarea></div>
               </div>
-              <div className="form-row" style={{gridTemplateColumns:'1fr 1fr 1fr'}}>
-                <div className="form-group"><label>Jenis Barang</label><select value={formData.item_type} onChange={e => setFormData({...formData, item_type: e.target.value})} className="modern-select"><option>Dokumen</option><option>Elektronik</option><option>Pakaian</option></select></div>
-                <div className="form-group"><label>Berat (Kg)</label><input type="number" min="1" value={formData.weight} onChange={e => setFormData({...formData, weight: e.target.value})} required /></div>
-                <div className="form-group"><label>Biaya Estimasi</label><input type="text" value={`Rp ${(formData.weight * (formData.service === 'Ekspres' ? 25000 : 15000)).toLocaleString()}`} disabled className="cost-input" /></div>
+
+              {/* SECTION INFORMASI BARANG */}
+              <div className="form-section-card" style={{marginTop: '2rem'}}>
+                <div className="section-header" style={{color: 'var(--primary)'}}>INFORMASI BARANG</div>
+                <div className="form-row">
+                  <div className="form-group"><label>Nama Barang</label><input type="text" value={formData.itemName} onChange={e => setFormData({...formData, itemName: e.target.value})} placeholder="Cth: Laptop" required /></div>
+                  <div className="form-group"><label>Jenis Barang</label>
+                    <select value={formData.itemCategory} onChange={e => setFormData({...formData, itemCategory: e.target.value})} className="modern-select">
+                      <option>Pakaian</option><option>Elektronik</option><option>Makanan</option><option>Dokumen</option><option>Lainnya</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="form-row">
+                  <div className="form-group"><label>Layanan</label>
+                    <select value={formData.service} onChange={e => setFormData({...formData, service: e.target.value})} className="modern-select">
+                      <option>Reguler</option><option>Ekspres</option><option>Same Day</option>
+                    </select>
+                  </div>
+                  <div className="form-group"><label>Berat (Kg)</label>
+                    <input type="number" min="1" value={formData.weight} onChange={e => setFormData({...formData, weight: parseFloat(e.target.value)})} required />
+                  </div>
+                </div>
+                <div className="form-row">
+                  <div className="form-group"><label>Estimasi Harga Barang (Rp) - <i>Di-enkripsi</i></label>
+                    <input type="number" value={formData.itemValue} onChange={e => {
+                      const val = parseFloat(e.target.value) || 0;
+                      const ins = val * 0.002; // 0.2%
+                      setFormData({...formData, itemValue: val, insuranceValue: ins});
+                    }} required />
+                  </div>
+                  <div className="form-group"><label>Premi Asuransi (0.2%)</label>
+                    <input type="text" value={`Rp ${formData.insuranceValue.toLocaleString()}`} readOnly className="cost-input" />
+                  </div>
+                </div>
+                <div className="form-group"><label>Keterangan Instruksi Kurir</label><textarea rows="2" value={formData.itemDesc} onChange={e => setFormData({...formData, itemDesc: e.target.value})} placeholder="Cth: Barang pecah belah, jangan dibanting"></textarea></div>
               </div>
-              <div className="form-group"><label>Alamat Lengkap (Secured)</label><textarea rows="3" value={formData.address} onChange={e => setFormData({...formData, address: e.target.value})} required></textarea></div>
-              <button type="submit" className="btn-primary" disabled={loading} style={{padding:'1.2rem 4rem'}}>{loading ? 'Mengamankan Data...' : 'Konfirmasi & Kirim Paket'}</button>
+
+              <div style={{marginTop: '2.5rem', display: 'flex', gap: '1rem'}}>
+                <button type="submit" className="btn-primary" disabled={loading} style={{flex: 2, padding: '1.2rem'}}>
+                  {loading ? '🔐 MENGAMANKAN DATA...' : 'KONFIRMASI & KIRIM PAKET'}
+                </button>
+                <div style={{flex: 1, background: '#fff', borderRadius: '12px', border: '1px solid #e2e8f0', padding: '1rem', textAlign: 'center'}}>
+                  <div style={{fontSize: '0.7rem', color: '#64748b'}}>TOTAL BIAYA</div>
+                  <div style={{fontSize: '1.2rem', fontWeight: '900', color: 'var(--primary)'}}>
+                    Rp {( (formData.weight * 10000 * (formData.service === 'Ekspres' ? 1.5 : formData.service === 'Same Day' ? 2 : 1)) + 5000 + formData.insuranceValue ).toLocaleString()}
+                  </div>
+                </div>
+              </div>
             </form>
+            
+            <style>{`
+              .form-section-card { background: #fff; padding: 1.5rem; border-radius: 16px; border: 1px solid #e2e8f0; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
+              .section-header { font-size: 0.75rem; font-weight: 900; letter-spacing: 1px; margin-bottom: 1.5rem; display: flex; align-items: center; gap: 10px; }
+              .section-header::after { content: ''; flex: 1; height: 1px; background: #f1f5f9; }
+            `}</style>
           </div>
         )}
 
@@ -378,48 +508,63 @@ function App() {
             <div className="card table-card">
               <div className="table-responsive">
                 <table className="custom-table">
-                  <thead><tr><th>No. Resi</th><th>Penerima</th><th>Layanan</th><th>Berat</th><th>Status (Klik)</th><th>Data Penerima (Secured)</th><th>Aksi</th></tr></thead>
+                  <thead><tr><th>No. Resi</th><th>Penerima</th><th>Layanan</th><th>Status</th><th>Data Terenkripsi</th><th>Aksi</th></tr></thead>
                   <tbody>
-                    {[...filteredShipments].reverse().map(item => {
-                      const { service, weight } = parseItemData(item.item_description);
+                    {filteredShipments.map(item => {
+                      const { service } = parseItemData(item);
                       return (
                         <tr key={item.id}>
                           <td className="tracking-id">{item.tracking_number}</td>
-                          <td style={{fontWeight: 700}}>{item.receiver_name}</td>
+                          <td style={{fontWeight: 700}}>{decryptedData[`receiver_${item.id}`] || '••••••••'}</td>
                           <td><span className={`service-badge ${service === 'Ekspres' ? 'ekspres' : ''}`}>{service}</span></td>
-                          <td>{weight} Kg</td>
                           <td>
                              <span 
                                className={`status-badge status-${item.status.toLowerCase().replace(/ /g, '')}`} 
                                onClick={() => handleCycleStatus(item.id, item.status)}
                                style={{cursor:'pointer'}}
-                               title="Klik untuk ubah status"
                              >
                                {item.status}
                              </span>
                           </td>
                           <td>
-                            <div style={{display:'flex', gap:'5px'}}>
-                              <div className="cipher-box">{decryptedData[`phone_${item.id}`] || item.receiver_phone.substring(0, 10) + '...'}</div>
-                              <div className="cipher-box">{decryptedData[`addr_${item.id}`] || item.address_encrypted.substring(0, 15) + '...'}</div>
+                            <div style={{display:'flex', gap:'5px', flexWrap: 'wrap'}}>
+                              <div className="cipher-box" title="Decrypted Receiver" style={{ background: decryptedData[`receiver_${item.id}`] ? '#ecfdf5' : '', color: decryptedData[`receiver_${item.id}`] ? '#059669' : '' }}>
+                                {decryptedData[`receiver_${item.id}`] || (item.receiver_name_enc || '••••').substring(0, 8) + '...'}
+                              </div>
+                              <div className="cipher-box" title="Decrypted Address" style={{ background: decryptedData[`receiver_addr_${item.id}`] ? '#ecfdf5' : '', color: decryptedData[`receiver_addr_${item.id}`] ? '#059669' : '' }}>
+                                {decryptedData[`receiver_addr_${item.id}`] || (item.receiver_addr_enc || '••••').substring(0, 8) + '...'}
+                              </div>
+                              <div className="cipher-box" title="Notes (Public)" style={{ background: '#fff7ed', color: '#c2410c', borderColor: '#ffedd5' }}>
+                                📝 {item.item_notes || 'No Notes'}
+                              </div>
+                              <div className="cipher-box" title="Insurance/Price" style={{ background: decryptedData[`insurance_${item.id}`] ? '#eff6ff' : '', color: decryptedData[`insurance_${item.id}`] ? '#2563eb' : '' }}>
+                                💰 {decryptedData[`insurance_${item.id}`] ? `Rp ${parseInt(decryptedData[`insurance_${item.id}`]).toLocaleString()}` : (item.insurance_enc || '••••').substring(0, 6) + '...'}
+                              </div>
                             </div>
                           </td>
                           <td>
                             <div className="action-btns">
-                              {decryptedData[`addr_${item.id}`] ? (
-                                <button className="btn-action lock" onClick={() => handleLock(item.id)} title="Kunci Kembali" style={{background:'#eef2ff', color:'var(--primary)'}}>
-                                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
-                                </button>
-                              ) : (
-                                <button className="btn-action decrypt" onClick={() => handleDecrypt(item.id, item.address_encrypted, item.receiver_phone, item.nonce)} title="Dekripsi Data" style={{background:'#eff6ff', color:'#2563eb'}}>
+                              {!decryptedData[`receiver_addr_${item.id}`] ? (
+                                <button className="btn-action decrypt" onClick={() => handleDecrypt(item.id, {
+                                  sender: item.sender_name_enc,
+                                  sender_phone: item.sender_phone_enc,
+                                  sender_kec: item.sender_kec_enc,
+                                  sender_addr: item.sender_addr_enc,
+                                  receiver: item.receiver_name_enc,
+                                  receiver_kec: item.receiver_kec_enc,
+                                  receiver_addr: item.receiver_addr_enc,
+                                  receiver_phone: item.receiver_phone_enc,
+                                  insurance: item.insurance_enc
+                                }, item.nonce)} title="Dekripsi Data">
                                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path><path d="M12 11v-4"></path></svg>
                                 </button>
+                              ) : (
+                                <button className="btn-action lock" onClick={() => handleLock(item.id)} title="Kunci Kembali">
+                                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+                                </button>
                               )}
-                              <button className="btn-action print" onClick={() => printReceipt(item)} title="Cetak Resi" style={{background:'#f0fdf4', color:'#16a34a'}}>
+                              <button className="btn-action print" onClick={() => printReceipt(item)} title="Cetak Resi">
                                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="6 9 6 2 18 2 18 9"></polyline><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path><rect x="6" y="14" width="12" height="8"></rect></svg>
-                              </button>
-                              <button className="btn-action delete" onClick={() => handleDelete(item.id)} title="Hapus Data" style={{background:'#fff1f2', color:'#e11d48'}}>
-                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
                               </button>
                             </div>
                           </td>
@@ -435,30 +580,60 @@ function App() {
 
         {currentView === 'reports' && (
           <div className="fade-in">
-            <div className="stats-grid">
-              <div className="stat-card" style={{borderLeft:'5px solid var(--primary)'}}><span className="stat-label">Total Revenue</span><div className="stat-value" style={{color:'var(--primary)'}}>Rp {calculateTotalRevenue().toLocaleString()}</div></div>
-              <div className="stat-card" style={{borderLeft:'5px solid var(--success)'}}><span className="stat-label">Avg Weight</span><div className="stat-value">{(shipments.reduce((acc, s) => acc + parseItemData(s.item_description).weight, 0) / (shipments.length || 1)).toFixed(1)} Kg</div></div>
-              <div className="stat-card" style={{borderLeft:'5px solid #6366f1'}}><span className="stat-label">Active Users</span><div className="stat-value">Admin Gateway</div></div>
+            <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'2rem', gap: '10px'}}>
+              <h2>Laporan Audit & Statistik</h2>
+              <div style={{display:'flex', gap:'10px'}}>
+                <button className="btn-primary" onClick={printFullReport} style={{background:'#6366f1'}}>Cetak Laporan (PDF)</button>
+                <button className="btn-primary" onClick={handleDecryptAll} style={{background:'#059669'}}>Mulai Audit Dekripsi (Full Access)</button>
+              </div>
+            </div>
+            
+            <div className="card" style={{marginBottom:'2rem'}}>
+              <h3>Tabel Audit Terperinci</h3>
+              <div className="table-responsive" style={{marginTop:'1.5rem'}}>
+                <table className="custom-table" style={{fontSize:'0.8rem'}}>
+                  <thead>
+                    <tr>
+                      <th>Resi</th>
+                      <th>Pengirim (Audit)</th>
+                      <th>Penerima (Audit)</th>
+                      <th>Alamat (Audit)</th>
+                      <th>Barang (Audit)</th>
+                      <th>Asuransi (Audit)</th>
+                      <th>Notes (Publik)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {shipments.map(s => (
+                      <tr key={s.id}>
+                        <td style={{fontWeight:'bold'}}>{s.tracking_number}</td>
+                        <td>{decryptedData[`sender_${s.id}`] || <span className="locked-data" title={s.sender_name_enc}>LOCKED</span>}</td>
+                        <td>{decryptedData[`receiver_${s.id}`] || <span className="locked-data" title={s.receiver_name_enc}>LOCKED</span>}</td>
+                        <td>{decryptedData[`receiver_kec_${s.id}`] ? `${decryptedData[`receiver_kec_${s.id}`]}, ${decryptedData[`receiver_addr_${s.id}`]}` : <span className="locked-data" title={s.receiver_addr_enc}>LOCKED</span>}</td>
+                        <td>{decryptedData[`item_name_${s.id}`] || <span className="locked-data" title={s.item_name_enc}>LOCKED</span>}</td>
+                        <td>{decryptedData[`insurance_${s.id}`] ? `Rp ${parseInt(decryptedData[`insurance_${s.id}`]).toLocaleString()}` : <span className="locked-data" title={s.insurance_enc}>LOCKED</span>}</td>
+                        <td style={{color: '#c2410c', fontWeight: 600}}>{s.item_notes || '-'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
 
-            <div className="main-grid" style={{gridTemplateColumns: '1.2fr 0.8fr', marginTop: '2rem', gap: '2rem'}}>
+            <div className="main-grid" style={{gridTemplateColumns: '1.2fr 0.8fr', gap: '2rem'}}>
               <div className="card">
                 <h3>Revenue Analysis</h3>
                 <div className="table-responsive" style={{marginTop:'1.5rem'}}>
                   <table className="custom-table">
-                    <thead><tr><th>Layanan</th><th>Vol (%)</th><th>Berat</th><th style={{textAlign:'right'}}>Revenue</th></tr></thead>
+                    <thead><tr><th>Layanan</th><th>Vol</th><th style={{textAlign:'right'}}>Revenue</th></tr></thead>
                     <tbody>
                       {['Reguler', 'Ekspres', 'Same Day'].map(svc => {
-                        const filtered = shipments.filter(s => parseItemData(s.item_description).service === svc);
-                        const volume = filtered.length;
-                        const pct = shipments.length ? ((volume / shipments.length) * 100).toFixed(0) : 0;
-                        const totalWeight = filtered.reduce((acc, s) => acc + parseItemData(s.item_description).weight, 0);
-                        const totalRev = filtered.reduce((acc, s) => acc + parseItemData(s.item_description).cost, 0);
+                        const filtered = shipments.filter(s => s.service_type === svc);
+                        const totalRev = filtered.length * (15000 + (svc === 'Ekspres' ? 10000 : 0));
                         return (
                           <tr key={svc}>
                             <td><span className={`service-badge ${svc !== 'Reguler' ? 'ekspres' : ''}`}>{svc}</span></td>
-                            <td>{volume} <span style={{fontSize:'0.7rem', opacity:0.5}}>({pct}%)</span></td>
-                            <td>{totalWeight} Kg</td>
+                            <td>{filtered.length}</td>
                             <td style={{textAlign:'right', fontWeight: '900', color: 'var(--primary)'}}>Rp {totalRev.toLocaleString()}</td>
                           </tr>
                         );
@@ -467,27 +642,23 @@ function App() {
                   </table>
                 </div>
               </div>
-
+              
               <div className="card">
                 <h3>Security Audit Log</h3>
                 <div className="table-responsive" style={{marginTop:'1.5rem'}}>
                   <table className="custom-table" style={{fontSize:'0.85rem'}}>
-                    <thead><tr><th>Waktu</th><th>Target</th></tr></thead>
+                    <thead><tr><th>Waktu</th><th>Event</th></tr></thead>
                     <tbody>
-                      {[...shipments].reverse().slice(0, 5).map(s => (
-                        <tr key={s.id}>
-                          <td style={{color:'var(--text-dim)'}}>{new Date(s.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</td>
-                          <td style={{fontFamily:'monospace', fontWeight:'bold'}}>{s.tracking_number}</td>
+                      {securityLogs.map(log => (
+                        <tr key={log.id}>
+                          <td>{log.time}</td>
+                          <td style={{color: log.type === 'warning' ? 'red' : 'inherit'}}>{log.msg}</td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
               </div>
-            </div>
-            
-            <div style={{marginTop:'2rem', textAlign:'right'}}>
-              <button className="btn-primary" style={{padding:'1rem 2rem'}} onClick={() => window.print()}>Export Audit Report (PDF)</button>
             </div>
           </div>
         )}
